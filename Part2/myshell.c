@@ -9,6 +9,7 @@
 #include "signal.h"
 #include "sys/stat.h"
 #include "fcntl.h"
+#include "errno.h"
 
 typedef struct process
 {
@@ -36,6 +37,7 @@ void freeProcessList(process *process_list);
 void updateProcessList(process **process_list);
 void updateProcessStatus(process *process_list, int pid, int status);
 void redirectAndExecute(cmdLine *cmdLine);
+void printStatus(int status);
 
 int main(int argc, char const *argv[])
 {
@@ -60,7 +62,10 @@ int main(int argc, char const *argv[])
             error("Line Reading Error", cmdLine, 1);
 
         if (strncmp(line, "quit\n", 5) == 0)
+        {
+            // TODO: terminated all processes in the background and release resources
             exit(EXIT_SUCCESS);
+        }
 
         cmdLine = parseCmdLines(line);
 
@@ -240,7 +245,6 @@ void redirectAndExecute(cmdLine *cmdLine)
 
 void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
 {
-    // printf("the command is: %s and the num of args is: %d\n", cmd->arguments[0], cmd->argCount);
     process *newProcess = malloc(sizeof(process));
     newProcess->cmd = cmd;
     newProcess->pid = pid;
@@ -275,11 +279,14 @@ void updateProcessList(process **process_list)
     process *currProcess = *process_list;
     while (currProcess)
     {
-        pid_t pid = waitpid(currProcess, &status, WNOHANG);
-        if (status < 0)
+        // TODO: find the proper flag to catch continue
+        int code = waitpid(currProcess->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
+        if (code < 0 && errno != ECHILD)
             error("asdfasdf", NULL, 0);
-        if (status > 0)
-            updateProcessStatus(currProcess, pid, status);
+        if (code < 0 && errno == ECHILD)
+            currProcess->status = TERMINATED;
+        if (code > 0)
+            updateProcessStatus(currProcess, currProcess->pid, status);
         currProcess = currProcess->next;
         status = 0;
     }
@@ -287,22 +294,58 @@ void updateProcessList(process **process_list)
 
 void updateProcessStatus(process *process_list, int pid, int status)
 {
-    process_list->status = status;
-    process_list->pid = pid;
+    if (WIFEXITED(status) || WIFSIGNALED(status))
+        process_list->status = TERMINATED;
+    else if (WIFSTOPPED(status))
+        process_list->status = SUSPENDED;
+    else if (WIFCONTINUED(status))
+        process_list->status = RUNNING;
 }
 
 void printProcessList(process **process_list)
 {
-    int j = 0;
+    updateProcessList(process_list);
+    int index = 0;
     process *currProcess = *process_list;
+    process *prevProcess = NULL;
     printf("Index        PID          STATUS       Command      \n");
     while (currProcess)
     {
-        printf("%d) %d %d ", j, currProcess->pid, currProcess->status);
+        printf("%d)       %d       ", index, currProcess->pid);
+        printStatus(currProcess->status);
         for (int i = 0; i < currProcess->cmd->argCount; i++)
             printf("%s%s", currProcess->cmd->arguments[i], i == currProcess->cmd->argCount - 1 ? "\n" : " ");
 
-        currProcess = currProcess->next;
-        j++;
+        // first process in the list was terminated
+        if (currProcess->status == TERMINATED && !prevProcess)
+        {
+            (*process_list) = currProcess->next;
+            freeCmdLines(currProcess->cmd);
+            prevProcess = currProcess;
+            currProcess = currProcess->next;
+            free(prevProcess);
+            prevProcess = NULL;
+        }
+        // non first process in the list was terminated
+        else if (currProcess->status == TERMINATED && prevProcess)
+        {
+            prevProcess->next = currProcess->next;
+            freeCmdLines(currProcess->cmd);
+            free(currProcess);
+            currProcess = prevProcess->next;
+        }
+        // this process wasn't terminated
+        else
+        {
+            prevProcess = currProcess;
+            currProcess = currProcess->next;
+        }
+        index++;
     }
+}
+
+void printStatus(int status)
+{
+    printf("%s      ", status == -1 ? "Terminated" : status == 1 ? "Running"
+                                                                 : "Suspended");
 }

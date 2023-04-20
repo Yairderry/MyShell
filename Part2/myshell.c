@@ -22,9 +22,11 @@ typedef struct process
 #define TERMINATED -1
 #define RUNNING 1
 #define SUSPENDED 0
+#define HISTLEN 20
 
-void execute(cmdLine *cmdLine, int debug, process **process_list);
-void error(char *errorMessage, cmdLine *cmdLine, int isExecvp);
+void execute(cmdLine *cmdLine);
+int quit();
+void error(char *errorMessage, int isExecvp);
 int signalProcess(char *pid, int signal);
 int cd(char *path);
 int procs(process **process_list);
@@ -38,15 +40,24 @@ void updateProcessList(process **process_list);
 void updateProcessStatus(process *process_list, int pid, int status);
 void redirectAndExecute(cmdLine *cmdLine);
 void printStatus(int status);
+void freeHistory();
+int printHistory();
+void addHistory(char *cmdLine);
+int executeLastCommand();
+int executeNthCommand(char *n);
+
+// Global Variables
+int debug = 0;
+process **process_list;
+char *history[HISTLEN];
+int oldestIndex = 0;
+int newestIndex = 0;
 
 int main(int argc, char const *argv[])
 {
     char cwd[PATH_MAX];
-    char line[2048];
     process *firstProcess;
-    process **process_list = &firstProcess;
-
-    int debug = 0;
+    process_list = &firstProcess;
 
     // Debug mode
     for (int i = 1; i < argc; i++)
@@ -55,35 +66,42 @@ int main(int argc, char const *argv[])
 
     while (1)
     {
+        char *line = (char *)malloc(2048);
         cmdLine *cmdLine;
         getcwd(cwd, PATH_MAX);
         printf("%s ", cwd);
-        if (fgets(line, sizeof(line), stdin) == NULL)
-            error("Line Reading Error", cmdLine, 1);
 
-        if (strncmp(line, "quit\n", 5) == 0)
-        {
-            // TODO: terminated all processes in the background and release resources
-            exit(EXIT_SUCCESS);
-        }
+        if (fgets(line, 2048, stdin) == NULL)
+            error("Line Reading Error", 0);
 
-        cmdLine = parseCmdLines(line);
+        if (line[0] != '!' && (!history[(newestIndex - 1) % HISTLEN] || strcmp(history[(newestIndex - 1) % HISTLEN], line) != 0))
+            addHistory(line);
 
-        if (cmdLine == NULL)
-            error("Parsing Error", cmdLine, 1);
+        if ((cmdLine = parseCmdLines(line)) == NULL)
+            error("Parsing Error", 0);
 
-        execute(cmdLine, debug, process_list);
-        // freeCmdLines(cmdLine);
+        execute(cmdLine);
     }
     return 0;
 }
 
-void execute(cmdLine *cmdLine, int debug, process **process_list)
+void execute(cmdLine *cmdLine)
 {
     int isBasicCommand = 0;
 
+    // Basic shell commands
     if (strcmp(cmdLine->arguments[0], "cd") == 0)
         isBasicCommand = cd(cmdLine->arguments[1]);
+    else if (strcmp(cmdLine->arguments[0], "quit") == 0)
+        isBasicCommand = quit();
+    // History commands
+    else if (strcmp(cmdLine->arguments[0], "history") == 0)
+        isBasicCommand = printHistory();
+    else if (strcmp(cmdLine->arguments[0], "!!") == 0)
+        isBasicCommand = executeLastCommand();
+    else if (cmdLine->arguments[0][0] == '!')
+        isBasicCommand = executeNthCommand(cmdLine->arguments[0] + 1);
+    // Job control
     else if (strcmp(cmdLine->arguments[0], "kill") == 0)
         isBasicCommand = signalProcess(cmdLine->arguments[1], SIGINT);
     else if (strcmp(cmdLine->arguments[0], "wake") == 0)
@@ -102,7 +120,7 @@ void execute(cmdLine *cmdLine, int debug, process **process_list)
 
     // Couldn't fork for any reason
     if (pid < 0)
-        error("Fork Error", cmdLine, 1);
+        error("Fork Error", 0);
 
     // Parent process
     if (pid > 0 && debug)
@@ -117,21 +135,31 @@ void execute(cmdLine *cmdLine, int debug, process **process_list)
         redirectAndExecute(cmdLine);
 }
 
-void error(char *errorMessage, cmdLine *cmdLine, int isExecvp)
+void error(char *errorMessage, int isExecvp)
 {
     perror(errorMessage);
-    if (cmdLine)
-        freeCmdLines(cmdLine);
+    freeProcessList(*process_list);
+    freeHistory();
     if (isExecvp)
         _exit(EXIT_FAILURE);
     exit(EXIT_FAILURE);
+}
+
+int quit()
+{
+    // TODO: terminate all processes
+    freeProcessList(*process_list);
+    freeHistory();
+    exit(EXIT_SUCCESS);
+
+    return 1;
 }
 
 int signalProcess(char *pid, int signal)
 {
     int PID = atoi(pid);
     if (kill(PID, signal) < 0)
-        error("Waking Process Error", NULL, 0);
+        error("Waking Process Error",  0);
 
     return 1;
 }
@@ -139,7 +167,7 @@ int signalProcess(char *pid, int signal)
 int cd(char *path)
 {
     if (chdir(path) < 0)
-        error("Changing Directories Error", NULL, 0);
+        error("Changing Directories Error", 0);
 
     return 1;
 }
@@ -155,12 +183,12 @@ void inputRedirect(char const *path)
     int fileDescriptor = open(path, O_RDONLY);
 
     if (fileDescriptor < 0)
-        error("Redirect Error", NULL, 0);
+        error("Redirect Error", 0);
 
     close(STDIN_FILENO);
 
     if (dup(fileDescriptor) < 0)
-        error("Duplication Error", NULL, 0);
+        error("Duplication Error", 0);
 
     close(fileDescriptor);
 }
@@ -170,12 +198,12 @@ void outputRedirect(char const *path)
     int fileDescriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
     if (fileDescriptor < 0)
-        error("Redirect Error", NULL, 0);
+        error("Redirect Error", 0);
 
     close(STDOUT_FILENO);
 
     if (dup(fileDescriptor) < 0)
-        error("Duplication Error", NULL, 0);
+        error("Duplication Error", 0);
 
     close(fileDescriptor);
 }
@@ -193,11 +221,11 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
     pid_t pid1, pid2;
 
     if (pipe(pipeFileDescriptor) < 0)
-        error("Pipe Error", cmdLine1, 0);
+        error("Pipe Error", 0);
 
     // Fork first child process
     if ((pid1 = fork()) < 0)
-        error("Fork Error", cmdLine1, 0);
+        error("Fork Error", 0);
 
     if (pid1 > 0)
         close(pipeFileDescriptor[1]);
@@ -213,7 +241,7 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
 
     // Fork second child process
     if (pid1 > 0 && (pid2 = fork()) < 0)
-        error("Fork Error", cmdLine1, 0);
+        error("Fork Error",  0);
 
     if (pid1 > 0 && pid2 > 0)
     {
@@ -240,7 +268,7 @@ void redirectAndExecute(cmdLine *cmdLine)
     if (cmdLine->outputRedirect)
         outputRedirect(cmdLine->outputRedirect);
     if (execvp(cmdLine->arguments[0], cmdLine->arguments) < 0)
-        error("Execution Error", cmdLine, 1);
+        error("Execution Error",  1);
 }
 
 void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
@@ -279,10 +307,9 @@ void updateProcessList(process **process_list)
     process *currProcess = *process_list;
     while (currProcess)
     {
-        // TODO: find the proper flag to catch continue
         int code = waitpid(currProcess->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
         if (code < 0 && errno != ECHILD)
-            error("asdfasdf", NULL, 0);
+            error("Wait Error", 0);
         if (code < 0 && errno == ECHILD)
             currProcess->status = TERMINATED;
         if (code > 0)
@@ -348,4 +375,74 @@ void printStatus(int status)
 {
     printf("%s      ", status == -1 ? "Terminated" : status == 1 ? "Running"
                                                                  : "Suspended");
+}
+
+void freeHistory()
+{
+    for (int i = 0; i < HISTLEN; i++)
+        if (history[i])
+            free(history[i]);
+}
+
+int printHistory()
+{
+    for (int i = 0; i < HISTLEN; i++)
+    {
+        int currIndex = (i + oldestIndex) % HISTLEN;
+        if (history[currIndex])
+            printf("%d %s", i + 1, history[currIndex]);
+    }
+
+    return 1;
+}
+
+void addHistory(char *cmdLine)
+{
+    history[newestIndex] = cmdLine;
+    newestIndex = (newestIndex + 1) % HISTLEN;
+
+    if (newestIndex == oldestIndex)
+        oldestIndex = (oldestIndex + 1) % HISTLEN;
+}
+
+int executeLastCommand()
+{
+    cmdLine *cmdLine;
+    printf("test\n");
+
+    if (!history[(newestIndex - 1) % HISTLEN])
+    {
+        printf("History Error: There are no previous commands.\n");
+        return 1;
+    }
+    if ((cmdLine = parseCmdLines(history[(newestIndex - 1) % HISTLEN])) == NULL)
+        error("Parsing Error", 0);
+
+    execute(cmdLine);
+    return 1;
+}
+
+int executeNthCommand(char *n)
+{
+    cmdLine *cmdLine;
+    int number = atoi(n);
+
+    if (1 > number || number > HISTLEN)
+    {
+        printf("History Error: Command number %s does not exist.\n", n);
+        return 1;
+    }
+    if (!history[(oldestIndex + number - 1) % HISTLEN])
+    {
+        printf("History Error: Could not find command number %s.\n", n);
+        return 1;
+    }
+    if ((cmdLine = parseCmdLines(history[(oldestIndex + number - 1) % HISTLEN])) == NULL)
+        error("Parsing Error", 0);
+
+    if (strcmp(history[(newestIndex - 1) % HISTLEN], history[(oldestIndex + number - 1) % HISTLEN]) != 0)
+        addHistory(history[(oldestIndex + number - 1) % HISTLEN]);
+
+    execute(cmdLine);
+    return 1;
 }

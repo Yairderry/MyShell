@@ -159,7 +159,7 @@ int signalProcess(char *pid, int signal)
 {
     int PID = atoi(pid);
     if (kill(PID, signal) < 0)
-        error("Waking Process Error",  0);
+        error("Waking Process Error", 0);
 
     return 1;
 }
@@ -227,9 +227,6 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
     if ((pid1 = fork()) < 0)
         error("Fork Error", 0);
 
-    if (pid1 > 0)
-        close(pipeFileDescriptor[1]);
-
     if (pid1 == 0)
     {
         close(STDOUT_FILENO);
@@ -238,24 +235,27 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
 
         redirectAndExecute(cmdLine1);
     }
-
-    // Fork second child process
-    if (pid1 > 0 && (pid2 = fork()) < 0)
-        error("Fork Error",  0);
-
-    if (pid1 > 0 && pid2 > 0)
+    else
     {
-        close(pipeFileDescriptor[0]);
-        waitpid(pid1, NULL, 0);
-        waitpid(pid2, NULL, 0);
-    }
-    if (pid1 > 0 && pid2 == 0)
-    {
-        close(STDIN_FILENO);
-        dup(pipeFileDescriptor[0]);
-        close(pipeFileDescriptor[0]);
+        close(pipeFileDescriptor[1]);
+        // Fork second child process
+        if ((pid2 = fork()) < 0)
+            error("Fork Error", 0);
 
-        redirectAndExecute(cmdLine2);
+        if (pid2 == 0)
+        {
+            close(STDIN_FILENO);
+            dup(pipeFileDescriptor[0]);
+            close(pipeFileDescriptor[0]);
+
+            redirectAndExecute(cmdLine2);
+        }
+        else
+        {
+            close(pipeFileDescriptor[0]);
+            waitpid(pid1, NULL, 0);
+            waitpid(pid2, NULL, 0);
+        }
     }
 
     return 1;
@@ -268,7 +268,7 @@ void redirectAndExecute(cmdLine *cmdLine)
     if (cmdLine->outputRedirect)
         outputRedirect(cmdLine->outputRedirect);
     if (execvp(cmdLine->arguments[0], cmdLine->arguments) < 0)
-        error("Execution Error",  1);
+        error("Execution Error", 1);
 }
 
 void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
@@ -285,8 +285,11 @@ void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
         return;
     }
 
-    while (currProcess->next)
+    while (currProcess && currProcess->next)
+    {
+        printf("curr process: %d\n", currProcess->pid);
         currProcess = currProcess->next;
+    }
 
     currProcess->next = newProcess;
 }
@@ -298,6 +301,10 @@ void freeProcessList(process *process_list)
 
     freeProcessList(process_list->next);
     freeCmdLines(process_list->cmd);
+
+    if (process_list->status != TERMINATED)
+        kill(process_list->pid, SIGINT);
+
     free(process_list);
 }
 
@@ -307,6 +314,7 @@ void updateProcessList(process **process_list)
     process *currProcess = *process_list;
     while (currProcess)
     {
+        printf("the current process pid is: %d\n", currProcess->pid);
         int code = waitpid(currProcess->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
         if (code < 0 && errno != ECHILD)
             error("Wait Error", 0);
@@ -398,6 +406,9 @@ int printHistory()
 
 void addHistory(char *cmdLine)
 {
+    if (history[newestIndex])
+        free(history[newestIndex]);
+
     history[newestIndex] = cmdLine;
     newestIndex = (newestIndex + 1) % HISTLEN;
 
@@ -408,7 +419,6 @@ void addHistory(char *cmdLine)
 int executeLastCommand()
 {
     cmdLine *cmdLine;
-    printf("test\n");
 
     if (!history[(newestIndex - 1) % HISTLEN])
     {

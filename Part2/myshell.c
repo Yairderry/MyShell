@@ -25,7 +25,7 @@ typedef struct process
 #define HISTLEN 20
 
 void execute(cmdLine *cmdLine);
-int quit();
+int quit(cmdLine *cmdLine);
 void error(char *errorMessage, int isExecvp);
 int signalProcess(char *pid, int signal);
 int cd(char *path);
@@ -56,7 +56,7 @@ int newestIndex = 0;
 int main(int argc, char const *argv[])
 {
     char cwd[PATH_MAX];
-    process *firstProcess;
+    process *firstProcess = NULL;
     process_list = &firstProcess;
 
     // Debug mode
@@ -74,11 +74,13 @@ int main(int argc, char const *argv[])
         if (fgets(line, 2048, stdin) == NULL)
             error("Line Reading Error", 0);
 
-        if (line[0] != '!' && (!history[(newestIndex - 1) % HISTLEN] || strcmp(history[(newestIndex - 1) % HISTLEN], line) != 0))
-            addHistory(line);
-
         if ((cmdLine = parseCmdLines(line)) == NULL)
             error("Parsing Error", 0);
+
+        if (line[0] != '!' && (!history[(newestIndex - 1) % HISTLEN] || strcmp(history[(newestIndex - 1) % HISTLEN], line) != 0))
+            addHistory(line);
+        else
+            free(line);
 
         execute(cmdLine);
     }
@@ -93,7 +95,7 @@ void execute(cmdLine *cmdLine)
     if (strcmp(cmdLine->arguments[0], "cd") == 0)
         isBasicCommand = cd(cmdLine->arguments[1]);
     else if (strcmp(cmdLine->arguments[0], "quit") == 0)
-        isBasicCommand = quit();
+        isBasicCommand = quit(cmdLine);
     // History commands
     else if (strcmp(cmdLine->arguments[0], "history") == 0)
         isBasicCommand = printHistory();
@@ -114,7 +116,10 @@ void execute(cmdLine *cmdLine)
         isBasicCommand = pipeCommands(cmdLine, cmdLine->next);
 
     if (isBasicCommand)
+    {
+        freeCmdLines(cmdLine);
         return;
+    }
 
     pid_t pid = fork();
 
@@ -145,11 +150,12 @@ void error(char *errorMessage, int isExecvp)
     exit(EXIT_FAILURE);
 }
 
-int quit()
+int quit(cmdLine *cmdLine)
 {
-    // TODO: terminate all processes
+
     freeProcessList(*process_list);
     freeHistory();
+    freeCmdLines(cmdLine);
     exit(EXIT_SUCCESS);
 
     return 1;
@@ -273,7 +279,7 @@ void redirectAndExecute(cmdLine *cmdLine)
 
 void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
 {
-    process *newProcess = malloc(sizeof(process));
+    process *newProcess = calloc(1, sizeof(process));
     newProcess->cmd = cmd;
     newProcess->pid = pid;
     newProcess->status = RUNNING;
@@ -300,8 +306,8 @@ void freeProcessList(process *process_list)
         return;
 
     freeProcessList(process_list->next);
+    printf("testing\n");
     freeCmdLines(process_list->cmd);
-
     if (process_list->status != TERMINATED)
         kill(process_list->pid, SIGINT);
 

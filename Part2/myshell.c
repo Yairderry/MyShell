@@ -112,12 +112,13 @@ void execute(cmdLine *cmdLine)
         isBasicCommand = signalProcess(cmdLine->arguments[1], SIGTSTP);
     else if (strcmp(cmdLine->arguments[0], "procs") == 0)
         isBasicCommand = procs(process_list);
-    else if (cmdLine->next)
-        isBasicCommand = pipeCommands(cmdLine, cmdLine->next);
 
     if (isBasicCommand)
+        return;
+
+    else if (cmdLine->next)
     {
-        freeCmdLines(cmdLine);
+        pipeCommands(cmdLine, cmdLine->next);
         return;
     }
 
@@ -222,6 +223,8 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
         exit(EXIT_FAILURE);
     }
 
+    cmdLine1->next = NULL;
+
     // Create pipe
     int pipeFileDescriptor[2];
     pid_t pid1, pid2;
@@ -241,27 +244,27 @@ int pipeCommands(cmdLine *cmdLine1, cmdLine *cmdLine2)
 
         redirectAndExecute(cmdLine1);
     }
-    else
-    {
+    if (pid1 > 0)
         close(pipeFileDescriptor[1]);
-        // Fork second child process
-        if ((pid2 = fork()) < 0)
-            error("Fork Error", 0);
+    // Fork second child process
+    if (pid1 > 0 && (pid2 = fork()) < 0)
+        error("Fork Error", 0);
 
-        if (pid2 == 0)
-        {
-            close(STDIN_FILENO);
-            dup(pipeFileDescriptor[0]);
-            close(pipeFileDescriptor[0]);
+    if (pid1 > 0 && pid2 == 0)
+    {
+        close(STDIN_FILENO);
+        dup(pipeFileDescriptor[0]);
+        close(pipeFileDescriptor[0]);
 
-            redirectAndExecute(cmdLine2);
-        }
-        else
-        {
-            close(pipeFileDescriptor[0]);
-            waitpid(pid1, NULL, 0);
-            waitpid(pid2, NULL, 0);
-        }
+        redirectAndExecute(cmdLine2);
+    }
+    if (pid1 > 0 && pid2 > 0)
+    {
+        close(pipeFileDescriptor[0]);
+        addProcess(process_list, cmdLine1, pid1);
+        addProcess(process_list, cmdLine2, pid2);
+        waitpid(pid1, NULL, 0);
+        waitpid(pid2, NULL, 0);
     }
 
     return 1;
@@ -283,21 +286,8 @@ void addProcess(process **process_list, cmdLine *cmd, pid_t pid)
     newProcess->cmd = cmd;
     newProcess->pid = pid;
     newProcess->status = RUNNING;
-
-    process *currProcess = *process_list;
-    if (!currProcess)
-    {
-        (*process_list) = newProcess;
-        return;
-    }
-
-    while (currProcess && currProcess->next)
-    {
-        printf("curr process: %d\n", currProcess->pid);
-        currProcess = currProcess->next;
-    }
-
-    currProcess->next = newProcess;
+    newProcess->next = *process_list;
+    (*process_list) = newProcess;
 }
 
 void freeProcessList(process *process_list)
@@ -306,7 +296,6 @@ void freeProcessList(process *process_list)
         return;
 
     freeProcessList(process_list->next);
-    printf("testing\n");
     freeCmdLines(process_list->cmd);
     if (process_list->status != TERMINATED)
         kill(process_list->pid, SIGINT);
@@ -320,7 +309,6 @@ void updateProcessList(process **process_list)
     process *currProcess = *process_list;
     while (currProcess)
     {
-        printf("the current process pid is: %d\n", currProcess->pid);
         int code = waitpid(currProcess->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
         if (code < 0 && errno != ECHILD)
             error("Wait Error", 0);
@@ -343,46 +331,35 @@ void updateProcessStatus(process *process_list, int pid, int status)
         process_list->status = RUNNING;
 }
 
+process *printAndRemove(process *proc, int index)
+{
+    if (!proc)
+        return NULL;
+
+    process *nextProcess = printAndRemove(proc->next, index + 1);
+
+    printf("%d)       %d       ", index, proc->pid);
+    printStatus(proc->status);
+    for (int i = 0; i < proc->cmd->argCount; i++)
+        printf("%s%s", proc->cmd->arguments[i], i == proc->cmd->argCount - 1 ? "\n" : " ");
+
+    if (proc->status != TERMINATED)
+    {
+        proc->next = nextProcess;
+        return proc;
+    }
+    else
+    {
+        // TODO: free resources of proc
+        return nextProcess;
+    }
+}
+
 void printProcessList(process **process_list)
 {
     updateProcessList(process_list);
-    int index = 0;
-    process *currProcess = *process_list;
-    process *prevProcess = NULL;
     printf("Index        PID          STATUS       Command      \n");
-    while (currProcess)
-    {
-        printf("%d)       %d       ", index, currProcess->pid);
-        printStatus(currProcess->status);
-        for (int i = 0; i < currProcess->cmd->argCount; i++)
-            printf("%s%s", currProcess->cmd->arguments[i], i == currProcess->cmd->argCount - 1 ? "\n" : " ");
-
-        // first process in the list was terminated
-        if (currProcess->status == TERMINATED && !prevProcess)
-        {
-            (*process_list) = currProcess->next;
-            freeCmdLines(currProcess->cmd);
-            prevProcess = currProcess;
-            currProcess = currProcess->next;
-            free(prevProcess);
-            prevProcess = NULL;
-        }
-        // non first process in the list was terminated
-        else if (currProcess->status == TERMINATED && prevProcess)
-        {
-            prevProcess->next = currProcess->next;
-            freeCmdLines(currProcess->cmd);
-            free(currProcess);
-            currProcess = prevProcess->next;
-        }
-        // this process wasn't terminated
-        else
-        {
-            prevProcess = currProcess;
-            currProcess = currProcess->next;
-        }
-        index++;
-    }
+    (*process_list) = printAndRemove(*process_list, 0);
 }
 
 void printStatus(int status)

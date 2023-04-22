@@ -22,7 +22,7 @@ typedef struct process
 #define TERMINATED -1
 #define RUNNING 1
 #define SUSPENDED 0
-#define HISTLEN 20
+#define HISTLEN 3
 
 void execute(cmdLine *cmdLine);
 int quit(cmdLine *cmdLine);
@@ -114,7 +114,10 @@ void execute(cmdLine *cmdLine)
         isBasicCommand = procs(process_list);
 
     if (isBasicCommand)
+    {
+        freeCmdLines(cmdLine);
         return;
+    }
 
     else if (cmdLine->next)
     {
@@ -350,6 +353,8 @@ process *printAndRemove(process *proc, int index)
     }
     else
     {
+        freeCmdLines(proc->cmd);
+        free(proc);
         // TODO: free resources of proc
         return nextProcess;
     }
@@ -379,7 +384,7 @@ int printHistory()
 {
     for (int i = 0; i < HISTLEN; i++)
     {
-        int currIndex = (i + oldestIndex) % HISTLEN;
+        int currIndex = ((history[newestIndex]? -1:0)+ i + oldestIndex+ HISTLEN) % HISTLEN;
         if (history[currIndex])
             printf("%d %s", i + 1, history[currIndex]);
     }
